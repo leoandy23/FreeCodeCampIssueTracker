@@ -1,227 +1,257 @@
-/*
- *
- *
- *       Complete the API routing below
- *
- *
- */
-
 "use strict";
+const ObjectID = require("mongodb").ObjectID;
 
-const expect = require("chai").expect;
-const MongoClient = require("mongodb");
-const ObjectId = require("mongodb").ObjectID;
-const { getDb: db } = require("../utils/database.js");
+const Project = require("../models/project");
+const Issue = require("../models/issue");
+const messages = require("../constants/messages");
 
-const CONNECTION_STRING = process.env.DB; //MongoClient.connect(CONNECTION_STRING, function(err, db) {})
+const convertIssue = (issue) => {
+  const {
+    _id,
+    title,
+    text,
+    created_on,
+    updated_on,
+    created_by,
+    assigned_to,
+    open,
+    status,
+  } = issue;
 
-const validateInputFields = (inputs, errorsArray = []) => {
-  for (let property in inputs) {
-    inputs[property] = inputs[property].trim();
-  }
-  const { issue_title, issue_text, created_by, assigned_to, status_text } =
-    inputs;
-  if (!(issue_title && issue_text && created_by)) {
-    errorsArray.push(" missing fields");
-    return;
-  }
-  if (issue_title.length < 1 || issue_title.length > 100) {
-    errorsArray.push(" title field is required");
-  }
-  if (issue_text.length < 3 || issue_text.length > 600) {
-    errorsArray.push(" text field is required");
-  }
-  if (created_by.length < 3 || created_by.length > 100) {
-    errorsArray.push(" Created_by field is required");
-  }
-  if (assigned_to && assigned_to.length > 30) {
-    errorsArray.push(" assigned_to maximum characters length 30");
-  }
-  if (status_text && status_text.length > 16) {
-    errorsArray.push(" status_text maximum characters length 16");
-  }
+  return {
+    _id,
+    issue_title: title,
+    issue_text: text,
+    created_on,
+    updated_on,
+    created_by,
+    assigned_to,
+    open,
+    status_text: status,
+  };
 };
 
-const validateInputFieldsUpdate = (inputs, errorsArray = []) => {
-  for (let property in inputs) {
-    if (typeof inputs[property] === "string")
-      inputs[property] = inputs[property].trim();
-  }
-
-  const { _id, issue_title, issue_text, created_by, assigned_to, status_text } =
-    inputs;
-
-  if (_id && _id.length !== 24) {
-    errorsArray.push("invalid id");
-  }
-  if (issue_title && issue_title.length > 100) {
-    errorsArray.push(" title fmaximum characters length 100");
-  }
-  if (issue_text && issue_text.length > 600) {
-    errorsArray.push(" text maximum characters length 600");
-  }
-  if (created_by && created_by.length > 100) {
-    errorsArray.push(" Created_by maximum characters length 100");
-  }
-  if (assigned_to && assigned_to.length > 30) {
-    errorsArray.push(" assigned_to maximum characters length 30");
-  }
-  if (status_text && status_text.length > 16) {
-    errorsArray.push(" status_text maximum characters length 16");
-  }
-};
-
-const ifFieldsValidationFails = (errorsArray) => {
-  console.log(errorsArray);
-  if (errorsArray.length > 0) {
-    const valErrors = errorsArray.join();
-    throw valErrors;
-  }
-};
-
-module.exports = function (app) {
+module.exports = (app) => {
   app
     .route("/api/issues/:project")
     .get(async (req, res) => {
+      const projectName = req.params.project;
+      const {
+        _id,
+        issue_title,
+        issue_text,
+        created_by,
+        assigned_to,
+        open,
+        status_text,
+      } = req.query;
+
       try {
-        const project = req.params.project;
-        const query = { project };
+        const project = await Project.findOne({ name: projectName });
+        let currentProject;
 
-        const queryFilters =
-          /^(_id|open|created_by|assigned_to|issue_title|status_text)$/;
-        for (let property in req.query) {
-          if (queryFilters.test(property)) {
-            query[property] = req.query[property];
-          }
-        }
-        if (query._id) {
-          query._id = new ObjectId(query._id);
-        }
-        if (query.hasOwnProperty("open")) {
-          query.open = query.open === "true" ? true : false;
+        if (!project) {
+          const newProject = new Project({ name: projectName });
+          await newProject.save();
+          currentProject = newProject;
+        } else {
+          currentProject = project;
         }
 
-        const issues = await db()
-          .collection("issues_tracker")
-          .find(query, { sort: { updated_on: -1 } })
-          .toArray();
-        return res.status(200).json(issues);
+        const issueIdToSearch = ObjectID(_id);
+
+        const issues = await Issue.aggregate([
+          { $match: { project_id: ObjectID(currentProject._id) } },
+          _id === undefined
+            ? { $match: {} }
+            : { $match: { _id: issueIdToSearch } },
+          issue_title === undefined
+            ? { $match: {} }
+            : { $match: { title: issue_title } },
+          issue_text === undefined
+            ? { $match: {} }
+            : { $match: { text: issue_text } },
+          open === undefined
+            ? { $match: {} }
+            : { $match: { open: open.toLowerCase() === "true" } },
+          created_by === undefined
+            ? { $match: {} }
+            : { $match: { created_by } },
+          assigned_to === undefined
+            ? { $match: {} }
+            : { $match: { assigned_to } },
+          status_text === undefined
+            ? { $match: {} }
+            : { $match: { status: status_text } },
+        ]);
+
+        if (issues.length === 0) {
+          return res.json([]);
+        }
+
+        const responseIssues = issues.map((issue) => {
+          return convertIssue(issue);
+        });
+
+        return res.json(responseIssues);
       } catch (err) {
-        res.status(500).json("database err");
+        return res.json({ error: err.message });
       }
     })
-
     .post(async (req, res) => {
-      try {
-        const validationErrors = [];
-        validateInputFields(req.body, validationErrors);
-        ifFieldsValidationFails(validationErrors);
+      const projectName = req.params.project;
+      const { issue_title, issue_text, created_by, assigned_to, status_text } =
+        req.body;
 
-        const newIssue = {
-          issue_title: req.body.issue_title,
-          issue_text: req.body.issue_text,
-          created_by: req.body.created_by,
-          assigned_to: req.body.assigned_to || "",
-          status_text: req.body.status_text || "",
-          open: true,
-          project: req.params.project,
+      if (!issue_title || !issue_text || !created_by) {
+        return res.json({ error: messages.MISSING_FIELD });
+      }
+
+      try {
+        const project = await Project.findOne({ name: projectName });
+        let currentProject;
+
+        if (!project) {
+          const newProject = new Project({ name: projectName });
+          await newProject.save();
+          currentProject = newProject;
+        } else {
+          currentProject = project;
+        }
+
+        const newIssue = new Issue({
+          title: issue_title,
+          text: issue_text,
+          created_by,
+          assigned_to: assigned_to || "",
           created_on: new Date(),
           updated_on: new Date(),
-        };
-        const result = await db()
-          .collection("issues_tracker")
-          .insertOne(newIssue);
-        const { project, ...createdIssue } = result.ops[0];
-        return res.status(200).json({ ...createdIssue });
+          open: true,
+          status: status_text || "",
+          project_id: currentProject._id,
+        });
+
+        await newIssue.save();
+        const returnedIssue = convertIssue(newIssue);
+
+        return res.json(returnedIssue);
       } catch (err) {
-        console.log("val error===============", err);
-        return res.status(200).type("text").send("missing inputs");
+        return res.json({ error: err.message });
       }
     })
-
     .put(async (req, res) => {
+      const projectName = req.params.project;
+      const {
+        _id,
+        issue_title,
+        issue_text,
+        created_by,
+        assigned_to,
+        status_text,
+        open,
+      } = req.body;
+
+      if (!_id) {
+        return res.json({ error: messages.MISSING_ID });
+      }
+
+      if (
+        !issue_title &&
+        !issue_text &&
+        !created_by &&
+        !assigned_to &&
+        !status_text &&
+        !open
+      ) {
+        return res.json({
+          error: messages.NO_UPDATE_FIELD,
+          _id,
+        });
+      }
+
       try {
-        const project = req.params.project;
-        const validationErrors = [];
-        validateInputFieldsUpdate(req.body, validationErrors);
-        ifFieldsValidationFails(validationErrors);
-        const { _id } = req.body;
-        const issue = await db()
-          .collection("issues_tracker")
-          .findOne({ _id: new ObjectId(_id) });
+        const project = await Project.findOne({ name: projectName });
+
+        if (!project) {
+          return res.json({
+            error: messages.COULD_NOT_UPDATE,
+            _id,
+          });
+        }
+
+        const issue = await Issue.findById(_id);
+
         if (!issue) {
-          return res.status(200).type("text").send("no updated field sent");
+          return res.json({
+            error: messages.COULD_NOT_UPDATE,
+            _id,
+          });
         }
 
-        let open;
-        if (req.body.hasOwnProperty("open")) {
-          open =
-            req.body.open === "true"
-              ? true
-              : req.body.open === true
-              ? true
-              : req.body.open === "false"
-              ? false
-              : req.body.open === false
-              ? false
-              : false;
-        } else {
-          open = issue.open;
-        }
-        const issueUpdates = {
-          issue_title: req.body.issue_title || issue.issue_title,
-          issue_text: req.body.issue_text || issue.issue_text,
-          created_by: req.body.created_by || issue.created_by,
-          assigned_to: req.body.assigned_to || issue.assigned_to,
-          status_text: req.body.status_text || issue.status_text,
-          updated_on: new Date(),
-          open,
-        };
+        issue.title = issue_title || issue.title;
+        issue.text = issue_text || issue.text;
+        issue.created_by = created_by || issue.created_by;
+        issue.assigned_to = assigned_to || issue.assigned_to;
+        issue.status = status_text || issue.status;
+        issue.updated_on = new Date();
 
-        const updateResult = await db()
-          .collection("issues_tracker")
-          .findOneAndUpdate(
-            { _id: new ObjectId(_id) },
-            { $set: { ...issueUpdates } },
-            { returnOriginal: false }
-          );
-        if (!updateResult) {
-          return res.status(200).json("unable to update issue");
+        if (open) {
+          // open from req.body is a string therefore it needs to be converted to boolean
+          const isOpen = open.toLowerCase() === "true" ? true : false;
+          issue.open = isOpen;
         }
 
-        const { project: omited, ...updatedIssue } = updateResult.value;
-        return res.status(200).type("text").send("successfully updated");
-        //.json({ message:'successfully updated', ...updatedIssue })
+        await issue.save();
+
+        return res.json({
+          result: messages.UPDATE_SUCCESS,
+          _id,
+        });
       } catch (err) {
-        console.log("update error===============", err);
-        return res.status(200).type("text").send("no updated field sent");
+        return res.json({
+          error: messages.COULD_NOT_UPDATE,
+          _id,
+        });
       }
     })
-
     .delete(async (req, res) => {
+      const projectName = req.params.project;
+      const issueId = req.body._id;
+
+      if (!issueId) {
+        return res.json({ error: messages.MISSING_ID });
+      }
+
       try {
-        const project = req.params.project;
-        const _id = req.body._id;
-        if (_id.length !== 24) {
-          return res.status(200).type("text").send("_id error");
+        const project = await Project.findOne({ name: projectName });
+
+        if (!project) {
+          return res.json({
+            error: messages.COULD_NOT_DELETE,
+            _id: issueId,
+          });
         }
 
-        const result = await db()
-          .collection("issues_tracker")
-          .findOneAndDelete({ _id: new ObjectId(_id) });
-        if (!result.value) {
-          return res.status(200).type("text").send("Unable to delete issue");
+        const issue = await Issue.findById(issueId);
+
+        if (!issue) {
+          return res.json({
+            error: messages.COULD_NOT_DELETE,
+            _id: issueId,
+          });
         }
 
-        return res
-          .status(200)
-          .type("text")
-          .send("deleted " + req.body._id);
+        await Issue.deleteOne({ _id: issueId });
+
+        return res.json({
+          result: messages.DELETE_SUCCESS,
+          _id: issueId,
+        });
       } catch (err) {
-        return res
-          .status(200)
-          .type("text")
-          .send(`could not delete ${req.body._id}`);
+        return res.json({
+          error: messages.COULD_NOT_DELETE,
+          _id: issueId,
+        });
       }
     });
 };
